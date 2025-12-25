@@ -1,12 +1,15 @@
+# fed_edge_server.py
+
 import threading
+import time
 
 from torch import optim, nn
 
 from app.config import config
 from app.config.logger import fed_logger
-from app.dto.bandwidth import BandWidth
+from app.entity.bandwidth import BandWidth  # Updated import path
 from app.dto.base_model import BaseModel
-from app.dto.message import IterationFlagMessage, GlobalWeightMessage, SplitLayerConfigMessage
+from app.dto.message import IterationFlagMessage, GlobalWeightMessage, SplitLayerConfigMessage, NetworkTestMessage
 from app.entity.aggregators.base_aggregator import BaseAggregator
 from app.entity.communicator import Communicator
 from app.entity.fed_base_node_interface import FedBaseNodeInterface
@@ -62,16 +65,22 @@ class FedEdgeServer(FedBaseNodeInterface):
         self.nets = {}
         self.optimizers = {}
         self.scheduler = {}
+
+        # Initialize split layers for decentralized mode
         if not self.is_edge_based:
             self.initialize_split_layers()
+
         for neighbor in self.get_neighbors([NodeType.CLIENT]):
             split_point = self.split_layers[neighbor]
+
+            # Handle 2-tier: split_point is int, not list
             if isinstance(split_point, list):
                 split_point = split_point[0]
+
             if split_point < len(self.uninet.cfg) - 1:
-                self.nets[neighbor] = model_utils.get_model('Edge', self.split_layers[neighbor], self.device,
+                self.nets[neighbor] = model_utils.get_model('Edge', split_point, self.device,
                                                             self.is_edge_based)
-                cweights = model_utils.get_model('Client', self.split_layers[neighbor], self.device,
+                cweights = model_utils.get_model('Client', split_point, self.device,
                                                  self.is_edge_based).state_dict()
                 pweights = model_utils.split_weights_server(self.uninet.state_dict(), cweights,
                                                             self.nets[neighbor].state_dict(), [])
@@ -83,15 +92,153 @@ class FedEdgeServer(FedBaseNodeInterface):
                     self.scheduler[neighbor] = optim.lr_scheduler.StepLR(self.optimizers[neighbor],
                                                                          config.lr_step_size, config.lr_gamma)
             else:
-                self.nets[neighbor] = model_utils.get_model('Edge', self.split_layers[neighbor], self.device,
+                self.nets[neighbor] = model_utils.get_model('Edge', split_point, self.device,
                                                             self.is_edge_based)
+
+    def initialize_split_layers(self):
+        """Initialize split_layers with default values for decentralized mode."""
+        model_len = model_utils.get_unit_model_len()
+        default_split = model_len - 1  # No offloading by default
+
+        for neighbor in self.get_neighbors([NodeType.CLIENT]):
+            self.split_layers[neighbor] = default_split
+
+        fed_logger.info(
+            f"[Edge {self.node_identifier}] Initialized split layers with default value: {default_split}"
+        )
+
+    # ================================================================
+    # BANDWIDTH MANAGEMENT - NEW METHODS
+    # ================================================================
+
+    def gather_neighbors_network_bandwidth(self):
+        """
+        Gather network bandwidth information from neighbors.
+        Supports both hardcoded and measured modes based on config.USE_HARDCODED_BW.
+        """
+        mode_str = 'Hardcoded' if config.USE_HARDCODED_BW else 'Measured'
+        fed_logger.info(
+            f"[Edge {self.node_identifier}] Gathering network bandwidth (Mode: {mode_str})"
+        )
+
+        for neighbor in self.get_neighbors([NodeType.CLIENT, NodeType.EDGE]):
+            if config.USE_HARDCODED_BW:
+                # Use hardcoded bandwidth values
+                bandwidth = self._get_hardcoded_bandwidth(neighbor)
+                fed_logger.info(
+                    f"[Edge {self.node_identifier}] Hardcoded BW for {neighbor}: "
+                    f"{bandwidth.to_mbps():.2f} Mbps ({bandwidth.to_mbytes_per_sec():.2f} MB/s)"
+                )
+            else:
+                # Measure actual bandwidth
+                bandwidth = self._measure_bandwidth(neighbor)
+                fed_logger.info(
+                    f"[Edge {self.node_identifier}] Measured BW for {neighbor}: "
+                    f"{bandwidth.to_mbps():.2f} Mbps ({bandwidth.to_mbytes_per_sec():.2f} MB/s)"
+                )
+
+            self.neighbor_bandwidth[neighbor] = bandwidth
+
+    def _get_hardcoded_bandwidth(self, neighbor: NodeIdentifier) -> BandWidth:
+        """
+        Get hardcoded bandwidth value for a neighbor.
+        Priority: Custom Map > Node Type Default > CLIENT Default
+        """
+        # Check custom bandwidth map first
+        node_key = f"{neighbor.ip}_{neighbor.port}"
+        if node_key in config.HARDCODED_BW_MAP:
+            bw_value = config.HARDCODED_BW_MAP[node_key]
+            fed_logger.debug(f"Using custom hardcoded BW for {node_key}: {bw_value}")
+            return BandWidth(hardcoded_value=bw_value)
+
+        # Determine node type for default value
+        try:
+            neighbor_type = HTTPCommunicator.get_node_type(neighbor)
+        except Exception as e:
+            fed_logger.warning(
+                f"Failed to determine node type for {neighbor}, defaulting to CLIENT. Error: {e}"
+            )
+            neighbor_type = NodeType.CLIENT
+
+        # Select default bandwidth based on node type
+        if neighbor_type == NodeType.CLIENT:
+            bw_value = config.HARDCODED_CLIENT_BW
+        elif neighbor_type == NodeType.EDGE:
+            bw_value = config.HARDCODED_EDGE_BW
+        else:
+            fed_logger.warning(
+                f"Unknown node type {neighbor_type} for {neighbor}, using CLIENT BW default"
+            )
+            bw_value = config.HARDCODED_CLIENT_BW
+
+        return BandWidth(hardcoded_value=bw_value)
+
+    def _measure_bandwidth(self, neighbor: NodeIdentifier) -> BandWidth:
+        """
+        Measure actual bandwidth by sending test data to neighbor.
+        Falls back to hardcoded value on error.
+        """
+        try:
+            # Prepare test data (1 KB)
+            test_data_size = 1024  # bytes
+            test_data = b'\0' * test_data_size
+
+            # Send test message and measure time
+            start_time = time.time()
+
+            test_msg = NetworkTestMessage([test_data])
+            self.send_msg(
+                self.get_exchange_name(),
+                HTTPCommunicator.get_rabbitmq_url(neighbor),
+                test_msg
+            )
+
+            # Wait for acknowledgment
+            response = self.recv_msg(
+                neighbor.get_exchange_name(),
+                config.current_node_mq_url,
+                NetworkTestMessage.MESSAGE_TYPE
+            )
+
+            end_time = time.time()
+            elapsed_time = end_time - start_time
+
+            # Validate elapsed time
+            if elapsed_time <= 0:
+                fed_logger.warning(
+                    f"Invalid elapsed time ({elapsed_time}s) for {neighbor}, "
+                    f"falling back to hardcoded BW"
+                )
+                return BandWidth(hardcoded_value=config.HARDCODED_CLIENT_BW)
+
+            # Create BandWidth object with measured values
+            return BandWidth(
+                transferred_bytes=test_data_size,
+                time=elapsed_time
+            )
+
+        except Exception as e:
+            fed_logger.error(
+                f"Bandwidth measurement failed for {neighbor}: {e}. "
+                f"Using fallback hardcoded value: {config.HARDCODED_CLIENT_BW}"
+            )
+            return BandWidth(hardcoded_value=config.HARDCODED_CLIENT_BW)
+
+    # ================================================================
+    # EXISTING METHODS (UPDATED WHERE NEEDED)
+    # ================================================================
 
     def gather_and_scatter_global_weight(self):
         received_messages = self.gather_msgs(GlobalWeightMessage.MESSAGE_TYPE, [NodeType.SERVER])
         msg: GlobalWeightMessage = received_messages[0].message
         weights = msg.weights[0]
         for neighbor in self.get_neighbors([NodeType.CLIENT]):
-            cweights = model_utils.get_model('Client', self.split_layers[neighbor], self.device,
+            # Handle 2-tier split_layers (int, not list)
+            split_point = self.split_layers[neighbor]
+            if isinstance(split_point, list):
+                split_point = split_point[0]
+
+            cweights = model_utils.get_model('Client', split_point, self.device,
                                              self.is_edge_based).state_dict()
             pweights = model_utils.split_weights_edgeserver(weights, cweights,
                                                             self.nets[neighbor].state_dict())
@@ -99,14 +246,38 @@ class FedEdgeServer(FedBaseNodeInterface):
         self.scatter_msg(GlobalWeightMessage([weights]), [NodeType.CLIENT])
 
     def clustering(self, options: dict):
-        self.group_labels = fl_method_parser.fl_methods.get(options.get('clustering'))(self)
+        # Clustering disabled for 2-tier architecture
+        if options.get('clustering') and options.get('clustering') != 'none':
+            fed_logger.warning("⚠️ Clustering not supported in 2-tier mode, skipping...")
+            self.group_labels = None
+        else:
+            self.group_labels = None
 
     def get_neighbors_bandwidth(self) -> dict[NodeIdentifier, BandWidth]:
         return self.neighbor_bandwidth
 
     def split(self, state, options: dict):
-        self.split_layers = fl_method_parser.fl_methods.get(options.get('splitting'))(state, self.group_labels, self)
-        fed_logger.info('Next Round OPs: ' + str(self.split_layers))
+        """
+        Invoke splitting method with proper kwargs.
+        Pass node=self for hardcoded BW support.
+        """
+        splitting_method = options.get('splitting', 'optimal_split')
+        split_func = fl_method_parser.fl_methods.get(splitting_method)
+
+        if split_func is None:
+            fed_logger.error(f"❌ Splitting method '{splitting_method}' not found!")
+            raise ValueError(f"Unknown splitting method: {splitting_method}")
+
+        # Call with node kwarg for hardcoded BW access
+        self.split_layers = split_func(state, self.group_labels, node=self)
+
+        # Validate: ensure all values are int (not list)
+        for client, split_point in self.split_layers.items():
+            if isinstance(split_point, list):
+                fed_logger.warning(f"⚠️ Converting list split to int for {client}")
+                self.split_layers[client] = split_point[0]
+
+        fed_logger.info('Next Round Split Points: ' + str(self.split_layers))
 
     def gather_and_scatter_split_config(self):
         received_messages = self.gather_msgs(SplitLayerConfigMessage.MESSAGE_TYPE, [NodeType.SERVER])
@@ -142,13 +313,19 @@ class FedEdgeServer(FedBaseNodeInterface):
             smashed_layers = msg.weights[0]
             labels = msg.weights[1]
             inputs, targets = smashed_layers.to(self.device), labels.to(self.device)
-            if self.split_layers[neighbor] < len(self.uninet.cfg) - 1:
+
+            # Handle 2-tier split_point (int)
+            split_point = self.split_layers[neighbor]
+            if isinstance(split_point, list):
+                split_point = split_point[0]
+
+            if split_point < len(self.uninet.cfg) - 1:
                 if neighbor in self.optimizers.keys():
                     self.optimizers[neighbor].zero_grad()
             outputs = self.nets[neighbor](inputs)
             loss = self.criterion(outputs, targets)
             loss.backward()
-            if self.split_layers[neighbor] < len(self.uninet.cfg) - 1:
+            if split_point < len(self.uninet.cfg) - 1:
                 if neighbor in self.optimizers:
                     self.optimizers[neighbor].step()
                     self.scheduler[neighbor].step()
@@ -183,7 +360,15 @@ class FedEdgeServer(FedBaseNodeInterface):
         server_neighbor = self.get_neighbors([NodeType.SERVER])[0]
         edge_exchange = self.get_exchange_name(neighbor)
         flag: bool = msg.flag
-        if self.split_layers[neighbor][1] < model_utils.get_unit_model_len() - 1:
+
+        # Handle 2-tier split_point (int) - convert to list for 3-tier compatibility
+        split_point = self.split_layers[neighbor]
+        if not isinstance(split_point, list):
+            split_layers_list = [split_point, split_point]  # Dummy for centralized
+        else:
+            split_layers_list = split_point
+
+        if split_layers_list[1] < model_utils.get_unit_model_len() - 1:
             self.send_msg(edge_exchange, HTTPCommunicator.get_rabbitmq_url(server_neighbor),
                           IterationFlagMessage(flag))
         else:
@@ -191,7 +376,7 @@ class FedEdgeServer(FedBaseNodeInterface):
                           IterationFlagMessage(False))
 
         while flag:
-            if self.split_layers[neighbor][0] < model_utils.get_unit_model_len() - 1:
+            if split_layers_list[0] < model_utils.get_unit_model_len() - 1:
                 msg: IterationFlagMessage = self.recv_msg(neighbor.get_exchange_name(), config.current_node_mq_url,
                                                           IterationFlagMessage.MESSAGE_TYPE)
                 flag: bool = msg.flag
@@ -208,11 +393,11 @@ class FedEdgeServer(FedBaseNodeInterface):
                 labels = msg.weights[1]
 
                 inputs, targets = smashed_layers.to(self.device), labels.to(self.device)
-                if self.split_layers[neighbor][0] < self.split_layers[neighbor][1]:
+                if split_layers_list[0] < split_layers_list[1]:
                     if neighbor in self.optimizers.keys():
                         self.optimizers[neighbor].zero_grad()
                     outputs = self.nets[neighbor](inputs)
-                    if self.split_layers[neighbor][1] < model_utils.get_unit_model_len() - 1:
+                    if split_layers_list[1] < model_utils.get_unit_model_len() - 1:
                         self.send_msg(edge_exchange,
                                       HTTPCommunicator.get_rabbitmq_url(server_neighbor),
                                       IterationFlagMessage(flag))
@@ -253,7 +438,12 @@ class FedEdgeServer(FedBaseNodeInterface):
         cweights = self.recv_msg(neighbor.get_exchange_name(), config.current_node_mq_url,
                                  GlobalWeightMessage.MESSAGE_TYPE).weights[0]
         server_neighbor = self.get_neighbors([NodeType.SERVER])[0]
-        split_point = self.split_layers[neighbor][0]
+
+        # Handle 2-tier split_point
+        split_point = self.split_layers[neighbor]
+        if isinstance(split_point, list):
+            split_point = split_point[0]
+
         if split_point != (config.model_len - 1):
             w_local = model_utils.concat_weights(self.uninet.state_dict(), cweights,
                                                  self.nets[neighbor].state_dict())
@@ -280,7 +470,11 @@ class FedEdgeServer(FedBaseNodeInterface):
         w_local_list = []
         client_neighbors = self.get_neighbors([NodeType.CLIENT])
         for neighbor in client_neighbors:
+            # Handle 2-tier split_point (int)
             split_point = self.split_layers[neighbor]
+            if isinstance(split_point, list):
+                split_point = split_point[0]
+
             w_local = (client_local_weights[neighbor], config.N / len(client_neighbors))
             if self.offload and split_point != (config.model_len - 1):
                 w_local = (
