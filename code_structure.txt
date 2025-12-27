@@ -1,0 +1,239 @@
+Folder PATH listing
+Volume serial number is 00000045 8C11:E600
+G:\MS_CLASSES\CODE
+³   .dockerignore
+³   .gitignore
+³   dc.yaml
+³   docker-compose.broker.yml
+³   Dockerfile
+³   FEATURE_SUMMARY.md
+³   folder_structure.txt
+³   LICENSE
+³   main.py
+³   plot_results.ipynb
+³   rabbitmq.conf
+³   README.md
+³   requirements.txt
+³   RESULTS_VISUALIZATION.md
+³   train_model.ipynb
+³   train_model.py
+³   
+ÃÄÄÄ.cursor
+³   ÀÄÄÄrules
+³           overview.mdc
+³           
+ÃÄÄÄ.github
+³   ÀÄÄÄworkflows
+³           release.yaml
+³           
+ÃÄÄÄ.idea
+³   ³   .gitignore
+³   ³   code.iml
+³   ³   misc.xml
+³   ³   modules.xml
+³   ³   vcs.xml
+³   ³   workspace.xml
+³   ³   
+³   ÀÄÄÄinspectionProfiles
+³           profiles_settings.xml
+³           
+ÃÄÄÄapp
+³   ³   __init__.py
+³   ³   
+³   ÃÄÄÄconfig
+³   ³       config.py
+³   ³       logger.py
+³   ³       
+³   ÃÄÄÄdataset
+³   ³   ³   .gitignore
+³   ³   ³   
+³   ³   ÃÄÄÄentity
+³   ³   ³       cifar10.py
+³   ³   ³       cifar100.py
+³   ³   ³       dataset_interface.py
+³   ³   ³       
+³   ³   ÀÄÄÄmobility_data
+³   ³           data.csv
+³   ³           process_mobility_data.ipynb
+³   ³           
+³   ÃÄÄÄdto
+³   ³       bandwidth.py
+³   ³       base_model.py
+³   ³       message.py
+³   ³       message_test.py
+³   ³       received_message.py
+³   ³       __init__.py
+³   ³       
+³   ÃÄÄÄentity
+³   ³   ³   communicator.py
+³   ³   ³   fed_base_node_interface.py
+³   ³   ³   fed_client.py
+³   ³   ³   fed_edge_server.py
+³   ³   ³   fed_server.py
+³   ³   ³   http_communicator.py
+³   ³   ³   mobility_manager.py
+³   ³   ³   node.py
+³   ³   ³   node_coordinate.py
+³   ³   ³   node_identifier.py
+³   ³   ³   node_type.py
+³   ³   ³   __init__.py
+³   ³   ³   
+³   ³   ÀÄÄÄaggregators
+³   ³           base_aggregator.py
+³   ³           factory.py
+³   ³           fed_avg.py
+³   ³           __init__.py
+³   ³           
+³   ÃÄÄÄfl_method
+³   ³       clustering.py
+³   ³       fl_method_parser.py
+³   ³       splitting.py
+³   ³       
+³   ÃÄÄÄfl_training
+³   ³   ÀÄÄÄflow
+³   ³           fed_client_flow.py
+³   ³           fed_edgeserver_flow.py
+³   ³           fed_server_flow.py
+³   ³           
+³   ÃÄÄÄmodel
+³   ³   ³   utils.py
+³   ³   ³   
+³   ³   ÃÄÄÄentity
+³   ³   ³   ÀÄÄÄnn_model
+³   ³   ³           vgg.py
+³   ³   ³           vgg16.py
+³   ³   ³           
+³   ³   ÀÄÄÄinterface
+³   ³           nn_model_interface.py
+³   ³           rl_model_interface.py
+³   ³           
+³   ÀÄÄÄutil
+³           data_utils.py
+³           energy_estimation.py
+³           generate_architecture_diagrams.py
+³           graph_utils.py
+³           input_utils.py
+³           mobility_data_utils.py
+³           model_utils.py
+³           
+ÃÄÄÄenergy-estimation
+³       config.py
+³       log_filters.py
+³       process.py
+³       service.py
+³       system_utils.py
+³       
+ÃÄÄÄevaluation
+³   ³   .gitignore
+³   ³   GPU_SETUP.md
+³   ³   scenario_creator.py
+³   ³   
+³   ÀÄÄÄtemplates
+³           docker-compose.yml.j2
+³           node-base.yml
+³           service-template.yml.j2
+³           
+ÀÄÄÄtest_app
+    ÃÄÄÄdecentralized_test
+    ³   ÃÄÄÄd2d
+    ³   ³       config.py
+    ³   ³       dc.yaml
+    ³   ³       
+    ³   ÃÄÄÄmobility_test
+    ³   ³   ÃÄÄÄneighbor_selection
+    ³   ³   ³   ³   config.py
+    ³   ³   ³   ³   dc.yaml
+    ³   ³   ³   ³   
+    ³   ³   ³   ÀÄÄÄprocessed_data
+    ³   ³   ³       ÃÄÄÄ001
+    ³   ³   ³       ³       001_data.csv
+    ³   ³   ³       ³       
+    ³   ³   ³       ÃÄÄÄ008
+    ³   ³   ³       ³       008_data.csv
+    ³   ³   ³       ³       
+    ³   ³   ³       ÃÄÄÄ009
+    ³   ³   ³       ³       009_data.csv
+    ³   ³   ³       ³       
+    ³   ³   ³       ÀÄÄÄ012
+    ³   ³   ³               012_data.csv
+    ³   ³   ³               
+    ³   ³   ÀÄÄÄone_edge_client_offload
+    ³   ³       ³   config.py
+    ³   ³       ³   dc.yaml
+    ³   ³       ³   
+    ³   ³       ÀÄÄÄprocessed_data
+    ³   ³           ÀÄÄÄ001
+    ³   ³                   001_data.csv
+    ³   ³                   
+    ³   ÃÄÄÄone_edge_client_offload
+    ³   ³       config.py
+    ³   ³       dc.yaml
+    ³   ³       
+    ³   ÀÄÄÄtwo_edges_with_two_clients
+    ³           config.py
+    ³           dc.yaml
+    ³           
+    ÃÄÄÄintegration
+    ³   ³   integration_test.py
+    ³   ³   __init__.py
+    ³   ³   
+    ³   ÃÄÄÄdocker_compose
+    ³   ³       config.py
+    ³   ³       rabbitmq.conf
+    ³   ³       rl_preTrain_1_1_1.yaml
+    ³   ³       test_classic_1_1.yaml
+    ³   ³       test_classic_1_3.yaml
+    ³   ³       test_fake_offloading_1_1.yaml
+    ³   ³       test_fake_offloading_1_1_1.yaml
+    ³   ³       test_fake_offloading_1_1_3.yaml
+    ³   ³       test_fake_offloading_1_2_4.yaml
+    ³   ³       test_fake_offloading_1_3.yaml
+    ³   ³       test_fedmec_offloading_1_1_1.yaml
+    ³   ³       test_no_offloading_1_1_1.yaml
+    ³   ³       test_no_offloading_1_1_3.yaml
+    ³   ³       test_no_offloading_1_2_4.yaml
+    ³   ³       test_only_edge_offloading_1_2_4.yaml
+    ³   ³       test_only_server_offloading_1_2_4.yaml
+    ³   ³       test_random_offloading_1_1_1.yaml
+    ³   ³       test_rl_offloading_1_1_1.yaml
+    ³   ³       test_rl_offloading_1_1_3.yaml
+    ³   ³       test_rl_offloading_1_3.yaml
+    ³   ³       test_rl_training_1_1_1.yaml
+    ³   ³       
+    ³   ÀÄÄÄtest_config
+    ³           rl_preTrain_1_1_1_config.py
+    ³           test_classic_1_1_config.py
+    ³           test_classic_1_3_config.py
+    ³           test_fake_offloading_1_1_1_config.py
+    ³           test_fake_offloading_1_1_3_config.py
+    ³           test_fake_offloading_1_1_config.py
+    ³           test_fake_offloading_1_2_4_config.py
+    ³           test_fake_offloading_1_3_config.py
+    ³           test_fedmec_offloading_1_1_1_config.py
+    ³           test_no_offloading_1_1_1_config.py
+    ³           test_no_offloading_1_1_3_config.py
+    ³           test_no_offloading_1_2_4_config.py
+    ³           test_only_edge_offloading_1_2_4_config.py
+    ³           test_only_server_offloading_1_2_4_config.py
+    ³           test_random_offloading_1_1_1_config.py
+    ³           test_rl_offloading_1_1_3_config.py
+    ³           test_rl_offloading_1_3_config.py
+    ³           test_rl_training_1_1_1_config.py
+    ³           
+    ÀÄÄÄrefactor_test
+        ÃÄÄÄno_offload_1_1
+        ³       config.py
+        ³       dc.yaml
+        ³       
+        ÃÄÄÄno_offload_1_1_1
+        ³       config.py
+        ³       dc.yaml
+        ³       
+        ÃÄÄÄoffload_1_1
+        ³       config.py
+        ³       dc.yaml
+        ³       
+        ÀÄÄÄoffload_1_1_1
+                config.py
+                dc.yaml
+                

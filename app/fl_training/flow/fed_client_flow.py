@@ -1,9 +1,18 @@
+"""
+Client Training Flow - Federated Learning Execution
+
+Supports:
+    - Standard FL with adaptive offloading
+    - Device-to-Device (D2D) gossip protocol
+    - Bandwidth-aware splitting
+    - Energy estimation and mobility simulation
+"""
+
 import logging
 import time
 import warnings
 
 from app.config import config
-from app.config.config import *
 from app.config.logger import fed_logger
 from app.entity.aggregators.factory import create_aggregator
 from app.entity.fed_client import FedClient
@@ -15,7 +24,7 @@ warnings.filterwarnings('ignore')
 logging.getLogger("requests").setLevel(logging.WARNING)
 
 
-def run_client(client: FedClient, learning_rate):
+def run_client(client: FedClient, learning_rate: float):
     """
     Execute standard federated learning client training flow.
 
@@ -26,32 +35,32 @@ def run_client(client: FedClient, learning_rate):
     for r in range(config.R):
         config.current_round = r
         fed_logger.info('====================================>')
-        fed_logger.info('ROUND: {} START'.format(r + 1))
+        fed_logger.info(f'ROUND: {r + 1} START')
 
         # Receive split configuration from edge server
-        # Split config determines which layers run locally vs. on edge
-        fed_logger.info("receiving splitting info")
+        fed_logger.info("Receiving split configuration from edge")
         client.gather_split_config()
 
         # Download global model weights from edge server
-        fed_logger.info("receiving global weights")
+        fed_logger.info("Downloading global model weights")
         client.gather_global_weights(NodeType.EDGE)
 
-        # Measure network bandwidth to edge server
-        # Bandwidth info is used by edge for adaptive splitting decisions
-        fed_logger.info("test network")
-        client.scatter_network_speed_to_edges()
+        # Measure/report network bandwidth to edge server (if not using hardcoded)
+        if not config.USE_HARDCODED_BW:
+            fed_logger.info("Measuring network bandwidth to edge")
+            client.scatter_network_speed_to_edges()
+        else:
+            fed_logger.info("Using hardcoded bandwidth - skipping measurement")
 
         # Execute local training with current split configuration
-        # May offload computation to edge based on split point
-        fed_logger.info("start training")
+        fed_logger.info("Starting local training with offloading support")
         client.start_offloading_train()
 
         # Upload locally trained model weights to edge server
-        fed_logger.info("sending local weights")
+        fed_logger.info("Uploading local model weights to edge")
         client.scatter_local_weights()
 
-        fed_logger.info('ROUND: {} END'.format(r + 1))
+        fed_logger.info(f'ROUND: {r + 1} END')
 
 
 def run_d2d(client: FedClient):
@@ -65,34 +74,33 @@ def run_d2d(client: FedClient):
     for r in range(config.R):
         config.current_round = r
         fed_logger.info('====================================>')
-        fed_logger.info('ROUND: {} START'.format(r + 1))
+        fed_logger.info(f'ROUND: {r + 1} START')
 
         # Receive global model from central server (not edge)
-        fed_logger.info("receiving global weights")
+        fed_logger.info("Downloading global model from server")
         client.gather_global_weights(NodeType.SERVER)
 
         # Train full model locally without offloading
-        fed_logger.info("start training")
+        fed_logger.info("Starting full local training (no offloading)")
         client.no_offloading_train()
 
         # Exchange models with peer clients via gossip protocol
-        fed_logger.info("gossip with neighbors")
+        fed_logger.info("Exchanging models with peer clients")
         client.gossip_with_neighbors()
 
-        # Upload aggregated model to central server
-        # Only cluster leaders upload to reduce communication
-        fed_logger.info("sending local weights")
+        # Upload aggregated model to central server (cluster leaders only)
+        fed_logger.info("Uploading to server (if cluster leader)")
         client.scatter_random_local_weights()
 
-        fed_logger.info('ROUND: {} END'.format(r + 1))
+        fed_logger.info(f'ROUND: {r + 1} END')
 
 
-def run(options_ins):
+def run(options_ins: dict):
     """
     Main entry point for client federated learning.
 
     Args:
-        options_ins: Dictionary containing all configuration options:
+        options_ins: Configuration dictionary containing:
             - ip: Client IP address
             - port: Client port
             - model: Model architecture name
@@ -103,20 +111,32 @@ def run(options_ins):
             - mobility: Enable client mobility simulation
             - d2d: Enable device-to-device mode (True=D2D, False=standard)
     """
-    fed_logger.info("start mode: " + str(options_ins.values()))
+    fed_logger.info(f"Starting client with config: {list(options_ins.values())}")
 
     # Get client index and learning rate from global config
     index = config.index
     learning_rate = config.learning_rate
 
     fed_logger.info('Preparing Client')
-    fed_logger.info('Preparing Data.')
+    fed_logger.info('Preparing Data Distribution')
 
     # Partition dataset for this client based on index
-    # Each client gets (N/K) samples where N=total samples, K=num clients
+    N = config.N  # Total training samples
+    K = config.K  # Total number of clients
+
     indices = list(range(N))
     part_tr = indices[int((N / K) * index): int((N / K) * (index + 1))]
-    train_loader = data_utils.get_trainloader(data_utils.get_trainset(), part_tr, 0)
+
+    train_loader = data_utils.get_trainloader(
+        data_utils.get_trainset(),
+        part_tr,
+        0  # Worker ID (0 for main process)
+    )
+
+    fed_logger.info(
+        f"Client {index}: Loaded {len(part_tr)} samples "
+        f"(indices {part_tr[0]}-{part_tr[-1]})"
+    )
 
     # Extract configuration options
     estimate_energy = options_ins.get("energy") == "True"
@@ -125,7 +145,9 @@ def run(options_ins):
 
     # Initialize energy estimation if enabled
     if estimate_energy:
+        import os
         energy_estimation.init(os.getpid())
+        fed_logger.info("Energy estimation enabled")
 
     # Extract network and training configuration
     ip = options_ins.get('ip')
@@ -146,20 +168,27 @@ def run(options_ins):
         neighbors=config.CURRENT_NODE_NEIGHBORS
     )
 
+    fed_logger.info(f"Client initialized with neighbors: {config.CURRENT_NODE_NEIGHBORS}")
+    fed_logger.info(f"Hardcoded BW mode: {config.USE_HARDCODED_BW}")
+
     # Start mobility simulation thread if enabled
-    # Handles dynamic client-edge association and handover
     if mobility:
+        fed_logger.info("Starting mobility simulation")
         start_mobility_simulation_thread(client)
-        # Uncomment for manual mobility control:
+        # Manual mobility control (uncomment if needed):
         # client.mobility_manager.discover_edges()
         # client.mobility_manager.monitor_and_migrate()
 
     # Execute appropriate training mode
     if d2d:
+        fed_logger.info("Running in D2D mode")
         run_d2d(client)
     else:
+        fed_logger.info("Running in standard FL mode")
         run_client(client, learning_rate)
 
     # Graceful shutdown after training completion
+    fed_logger.info("Training completed - shutting down client")
     time.sleep(10)
     client.stop_server()
+    fed_logger.info("Client stopped successfully")

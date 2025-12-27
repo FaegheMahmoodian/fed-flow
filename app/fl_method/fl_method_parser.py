@@ -26,7 +26,7 @@ fl_methods = {
     "no_splitting": splitting.no_splitting,
     "only_edge_splitting": splitting.only_edge_splitting,
     "only_server_splitting": splitting.only_server_splitting,
-    "random_splitting": splitting.randomSplitting,
+    "random_splitting": splitting.random_split,
     "fedmec_splitting": splitting.FedMec,
 
     # ============================================================

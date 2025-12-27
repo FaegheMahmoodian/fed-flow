@@ -1,53 +1,41 @@
 """
+Semi-Decentralized FL Splitting Module
+
 Architecture:
     Client ←→ Edge Server (Single split point per client)
 
 Features:
-    - Hardcoded bandwidth support
+    - Hardcoded bandwidth support via config.USE_HARDCODED_BW
     - Single-layer splitting (no cloud server)
+    - Multiple splitting strategies (optimal, adaptive, uniform, etc.)
 """
 
 import random
 import numpy as np
 from typing import Dict, List, Optional, Callable
-from collections import defaultdict
 
 from app.config import config
 from app.entity.fed_base_node_interface import FedBaseNodeInterface
 from app.entity.node_identifier import NodeIdentifier
 from app.entity.node_type import NodeType
 from app.util import model_utils
-from app.util.bandwidth import (
-    load_client_bandwidths,
-    apply_fluctuation_to_all,
-    estimate_layer_latency
-)
+from app.dto.bandwidth import BandWidth
 
 
-# ══════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════
 #  Helper Functions
 # ═══════════════════════════════════════════════════════════════
 
 def _validate_split_point(split_point: int, model_len: int) -> int:
     """
-    Validate and clamp split point to valid range.
-
-    Ensures split point is within [1, model_len-1] to maintain:
-    - At least 1 layer on client side
-    - At least 1 layer on edge side
+    Clamp split point to valid range [1, model_len-1].
 
     Args:
         split_point: Proposed split layer index
-        model_len: Total number of layers in model
+        model_len: Total number of layers
 
     Returns:
-        int: Clamped split point
-
-    Example:
-        >>> _validate_split_point(0, 7)
-        1  # Minimum is 1
-        >>> _validate_split_point(10, 7)
-        6  # Maximum is model_len - 1
+        int: Valid split point
     """
     min_split = 1
     max_split = model_len - 1
@@ -56,41 +44,29 @@ def _validate_split_point(split_point: int, model_len: int) -> int:
 
 def _get_model_length(node: FedBaseNodeInterface) -> int:
     """
-    Get total number of layers in the model.
+    Get total number of model layers.
 
     Args:
         node: FedEdgeServer or FedClient instance
 
     Returns:
         int: Number of layers
-
-    Raises:
-        AttributeError: If node doesn't have uninet attribute
     """
     try:
         return len(node.uninet.cfg)
     except AttributeError:
-        # Fallback to config if node doesn't have model
         return config.model_len
 
 
 def _compute_workload_distribution(model_cfg: List) -> np.ndarray:
     """
-    Compute normalized workload distribution across layers.
-
-    Calculates cumulative FLOPs for each layer and normalizes to [0, 1].
-    Used for FLOP-based splitting decisions.
+    Compute normalized cumulative workload (FLOPs) per layer.
 
     Args:
-        model_cfg: Model configuration list from config.model_cfg
+        model_cfg: Model configuration list
 
     Returns:
         np.ndarray: Normalized cumulative workload [0.0, ..., 1.0]
-
-    Example:
-        >>> cfg = [(..., 100), (..., 200), (..., 300)]  # FLOPs at index 5
-        >>> _compute_workload_distribution(cfg)
-        array([0.167, 0.5, 1.0])  # Cumulative: 100/600, 300/600, 600/600
     """
     workload = []
     cumulated_flops = 0
@@ -99,7 +75,6 @@ def _compute_workload_distribution(model_cfg: List) -> np.ndarray:
         cumulated_flops += layer[5]  # FLOPs at index 5
         workload.append(cumulated_flops)
 
-    # Normalize to [0, 1]
     workload_array = np.array(workload)
     total_flops = cumulated_flops
 
@@ -109,54 +84,143 @@ def _compute_workload_distribution(model_cfg: List) -> np.ndarray:
     return workload_array
 
 
+def _load_client_bandwidths(node: FedBaseNodeInterface, state: Optional[List[float]]) -> tuple:
+    """
+    Load client bandwidths from hardcoded config or measured state.
+
+    Priority:
+        1. Hardcoded mode (config.USE_HARDCODED_BW = True)
+        2. State parameter (measured bandwidths)
+        3. node.neighbor_bandwidth (cached measurements)
+
+    Args:
+        node: Edge server instance
+        state: Optional list of measured bandwidths (Mbps)
+
+    Returns:
+        tuple: (clients: List[NodeIdentifier], bandwidths: List[float in Mbps])
+    """
+    clients = node.get_neighbors([NodeType.CLIENT])
+
+    if config.USE_HARDCODED_BW:
+        # Use hardcoded bandwidths from node._get_hardcoded_bandwidth()
+        bandwidths = []
+        for client in clients:
+            bw = node._get_hardcoded_bandwidth(client)
+            bandwidths.append(bw.to_mbps())
+    else:
+        # Use measured bandwidths
+        if state and len(state) > 0:
+            bandwidths = state
+        else:
+            # Fallback to cached neighbor_bandwidth
+            bandwidths = []
+            for client in clients:
+                if client in node.neighbor_bandwidth:
+                    bw = node.neighbor_bandwidth[client]
+                    bandwidths.append(bw.to_mbps())
+                else:
+                    # Default fallback: 15 Mbps
+                    bandwidths.append(15.0)
+
+    return clients, bandwidths
+
+
+def _apply_fluctuation(bandwidths: List[float], round_num: int) -> List[float]:
+    """
+    Apply random fluctuation to simulate network variance.
+
+    Only active if config.USE_BW_FLUCTUATION = True.
+    Uses deterministic seed based on round number for reproducibility.
+
+    Args:
+        bandwidths: List of bandwidth values (Mbps)
+        round_num: Current training round
+
+    Returns:
+        List[float]: Fluctuated bandwidths (±10% variance)
+    """
+    if not getattr(config, 'USE_BW_FLUCTUATION', False):
+        return bandwidths
+
+    fluctuation_rate = 0.1  # ±10%
+    fluctuated = []
+
+    for i, bw in enumerate(bandwidths):
+        # Deterministic seed per client per round
+        random.seed(hash(f"{round_num}_{i}_{bw}"))
+        variance = random.uniform(-fluctuation_rate, fluctuation_rate)
+        new_bw = bw * (1 + variance)
+        fluctuated.append(max(1.0, new_bw))  # Min 1 Mbps
+
+    return fluctuated
+
+
+def _estimate_layer_latency(bandwidth_mbps: float, layer_idx: int, model_cfg: List) -> float:
+    """
+    Estimate communication latency for transmitting layer output.
+
+    Args:
+        bandwidth_mbps: Client bandwidth in Mbps
+        layer_idx: Layer index
+        model_cfg: Model configuration
+
+    Returns:
+        float: Estimated latency in milliseconds
+    """
+    if layer_idx >= len(model_cfg):
+        return 0.0
+
+    # Get layer output size (bytes) at index 6
+    layer_output_size = model_cfg[layer_idx][6]
+
+    # Convert bandwidth to bytes/sec
+    bw_bytes_per_sec = (bandwidth_mbps * 1_000_000) / 8
+
+    # Calculate transmission time
+    if bw_bytes_per_sec > 0:
+        transmission_time_sec = layer_output_size / bw_bytes_per_sec
+        return transmission_time_sec * 1000  # Convert to ms
+    else:
+        return float('inf')
+
+
 # ═══════════════════════════════════════════════════════════════
-# 🟢 Section 1: Bandwidth-Aware Splitting Methods
+#  Bandwidth-Aware Splitting Methods
 # ═══════════════════════════════════════════════════════════════
 
 def optimal_split(state, labels, **kwargs) -> Dict[NodeIdentifier, int]:
     """
-    Optimal bandwidth-aware splitting for semi-decentralized FL.
+    Optimal bandwidth-proportional splitting.
 
-    Computes split points proportional to client bandwidth:
-    - Higher BW → More layers on client (later split)
-    - Lower BW → Fewer layers on client (early split)
+    Higher BW → More layers on client (later split)
+    Lower BW → Fewer layers on client (earlier split)
 
     Algorithm:
-        1. Load bandwidths from hardcoded config or state
-        2. Apply fluctuation if enabled
-        3. Calculate BW ratio: client_bw / max_bw
-        4. Compute split: ratio × (max_layer - min_layer) + min_layer
+        split = (client_bw / max_bw) × (max_layer - min_layer) + min_layer
 
     Args:
-        state: List[float] - Optional dynamic bandwidth measurements (Mbps)
-        labels: Unused (kept for interface compatibility)
-        **kwargs: Must contain 'node' (FedEdgeServer instance)
+        state: Optional list of measured bandwidths (Mbps)
+        labels: Unused (interface compatibility)
+        **kwargs: Must contain 'node' (FedEdgeServer)
 
     Returns:
         Dict[NodeIdentifier, int]: Split point per client
 
-    Example:
-        >>> # config.HARDCODED_CLIENT_BW = {"client1": 15.0, "client2": 8.0}
-        >>> optimal_split([], [], node=edge_server)
-        {
-            NodeIdentifier('client1'): 6,  # High BW → split at layer 6
-            NodeIdentifier('client2'): 3   # Low BW → split at layer 3
-        }
-
     Raises:
-        ValueError: If 'node' parameter is missing
+        ValueError: If 'node' not in kwargs
     """
     node = kwargs.get('node')
     if node is None:
-        raise ValueError(" optimal_split requires 'node' parameter in kwargs")
+        raise ValueError("optimal_split requires 'node' parameter in kwargs")
 
-    # Load client bandwidths (hardcoded or dynamic)
-    clients, bandwidths = load_client_bandwidths(node, state)
+    # Load bandwidths (hardcoded or measured)
+    clients, bandwidths = _load_client_bandwidths(node, state)
 
-    # Apply bandwidth fluctuation if enabled
-    bandwidths = apply_fluctuation_to_all(bandwidths, config.current_round)
+    # Apply fluctuation if enabled
+    bandwidths = _apply_fluctuation(bandwidths, config.current_round)
 
-    # Get model configuration
+    # Get model length
     model_len = _get_model_length(node)
     max_bw = max(bandwidths) if bandwidths else 15.0
 
@@ -164,16 +228,11 @@ def optimal_split(state, labels, **kwargs) -> Dict[NodeIdentifier, int]:
     min_split = 1
     max_split = model_len - 1
 
-    # Calculate split points based on bandwidth ratio
+    # Calculate split points
     split_layers = {}
     for client, client_bw in zip(clients, bandwidths):
-        # BW ratio in [0, 1]
         bw_ratio = client_bw / max_bw
-
-        # Map to layer range
         split_point = int(bw_ratio * (max_split - min_split) + min_split)
-
-        # Validate and store
         split_layers[client] = _validate_split_point(split_point, model_len)
 
     return split_layers
@@ -181,56 +240,46 @@ def optimal_split(state, labels, **kwargs) -> Dict[NodeIdentifier, int]:
 
 def bandwidth_aware_split(state, labels, **kwargs) -> Dict[NodeIdentifier, int]:
     """
-    Advanced splitting with latency threshold consideration.
+    Splitting with latency threshold consideration.
 
-    Adjusts split points based on both bandwidth and estimated latency:
-    - If latency > threshold → Early split (minimize communication)
-    - If latency ≤ threshold → BW-proportional split
-
-    Use Case:
-        Networks with variable latency (WiFi, cellular)
+    If estimated latency > threshold → Early split (minimize communication)
+    Else → Bandwidth-proportional split
 
     Args:
-        state: List[float] - Optional bandwidth measurements
+        state: Optional bandwidth measurements
         labels: Unused
         **kwargs:
-            - node: FedEdgeServer instance (required)
-            - latency_threshold: float - Max acceptable latency in ms (default: 100.0)
+            - node: FedEdgeServer (required)
+            - latency_threshold: Max acceptable latency in ms (default: 100.0)
 
     Returns:
         Dict[NodeIdentifier, int]: Split point per client
-
-    Example:
-        >>> bandwidth_aware_split([], [], node=edge, latency_threshold=80.0)
-        {
-            NodeIdentifier('client1'): 1,  # High latency → early split
-            NodeIdentifier('client2'): 5   # Low latency → distributed split
-        }
     """
     node = kwargs.get('node')
     if node is None:
-        raise ValueError("❌ bandwidth_aware_split requires 'node' parameter")
+        raise ValueError("bandwidth_aware_split requires 'node' parameter")
 
     latency_threshold = kwargs.get('latency_threshold', 100.0)  # ms
 
     # Load and fluctuate bandwidths
-    clients, bandwidths = load_client_bandwidths(node, state)
-    bandwidths = apply_fluctuation_to_all(bandwidths, config.current_round)
+    clients, bandwidths = _load_client_bandwidths(node, state)
+    bandwidths = _apply_fluctuation(bandwidths, config.current_round)
 
     model_len = _get_model_length(node)
+    model_cfg = node.uninet.cfg if hasattr(node, 'uninet') else config.model_cfg.get(config.model_name, [])
+
     split_layers = {}
 
     for client, client_bw in zip(clients, bandwidths):
-        # Estimate latency for middle split point
+        # Estimate latency for middle split
         mid_split = model_len // 2
-        estimated_latency = estimate_layer_latency(mid_split, client_bw)
+        estimated_latency = _estimate_layer_latency(client_bw, mid_split, model_cfg)
 
         if estimated_latency > latency_threshold:
-            # High latency → minimize communication (split early)
+            # High latency → early split
             split_point = 1
         else:
-            # Low latency → distribute computation based on BW
-            # Assume reference BW = 15.0 Mbps for full model
+            # Low latency → BW-proportional split
             split_point = int((client_bw / 15.0) * model_len)
             split_point = _validate_split_point(split_point, model_len)
 
@@ -241,43 +290,35 @@ def bandwidth_aware_split(state, labels, **kwargs) -> Dict[NodeIdentifier, int]:
 
 def adaptive_split(state, labels, **kwargs) -> Dict[NodeIdentifier, int]:
     """
-    Adaptive splitting based on historical performance.
+    Adaptive splitting based on historical accuracy.
 
-    Adjusts split points based on previous round accuracy:
-    - If accuracy improving → Keep/increase client computation
-    - If accuracy degrading → Reduce client computation
+    Adjusts split based on previous round performance:
+        - Accuracy < threshold → Reduce client computation
+        - Accuracy ≥ threshold → Increase client computation
 
-    State Management:
-        Requires node to maintain:
+    Requires node attributes:
         - self.prev_split_layers: Dict[NodeIdentifier, int]
         - self.prev_accuracies: Dict[NodeIdentifier, float]
 
     Args:
-        state: List[float] - Optional bandwidth measurements
+        state: Optional bandwidth measurements
         labels: Unused
         **kwargs:
-            - node: FedEdgeServer instance (required)
-            - accuracy_threshold: float - Minimum acceptable accuracy (default: 0.6)
+            - node: FedEdgeServer (required)
+            - accuracy_threshold: Minimum acceptable accuracy (default: 0.6)
 
     Returns:
         Dict[NodeIdentifier, int]: Adjusted split points
-
-    Example:
-        >>> # Previous round: client1 had accuracy=0.55 with split=4
-        >>> adaptive_split([], [], node=edge, accuracy_threshold=0.6)
-        {
-            NodeIdentifier('client1'): 3  # Decreased (poor performance)
-        }
     """
     node = kwargs.get('node')
     if node is None:
-        raise ValueError("❌ adaptive_split requires 'node' parameter")
+        raise ValueError("adaptive_split requires 'node' parameter")
 
     accuracy_threshold = kwargs.get('accuracy_threshold', 0.6)
 
     # Load bandwidths
-    clients, bandwidths = load_client_bandwidths(node, state)
-    bandwidths = apply_fluctuation_to_all(bandwidths, config.current_round)
+    clients, bandwidths = _load_client_bandwidths(node, state)
+    bandwidths = _apply_fluctuation(bandwidths, config.current_round)
 
     model_len = _get_model_length(node)
     split_layers = {}
@@ -288,18 +329,16 @@ def adaptive_split(state, labels, **kwargs) -> Dict[NodeIdentifier, int]:
     if not hasattr(node, 'prev_accuracies'):
         node.prev_accuracies = {}
 
-    for client, client_bw in zip(clients, bandwidths):
+    for client in clients:
         # Get previous split and accuracy
         prev_split = node.prev_split_layers.get(client, model_len // 2)
         prev_acc = node.prev_accuracies.get(client, 0.5)
 
         # Adaptive adjustment
         if prev_acc < accuracy_threshold:
-            # Poor performance → reduce client computation
-            split_point = max(1, prev_split - 1)
+            split_point = max(1, prev_split - 1)  # Reduce client load
         else:
-            # Good performance → increase client computation
-            split_point = min(model_len - 1, prev_split + 1)
+            split_point = min(model_len - 1, prev_split + 1)  # Increase client load
 
         split_layers[client] = _validate_split_point(split_point, model_len)
 
@@ -310,41 +349,30 @@ def uniform_split(state, labels, **kwargs) -> Dict[NodeIdentifier, int]:
     """
     Uniform splitting - same split point for all clients.
 
-    Useful for:
-    - Baseline comparisons
-    - Homogeneous client configurations
-    - Simplified debugging
+    Use cases:
+        - Baseline comparisons
+        - Homogeneous environments
+        - Debugging
 
     Args:
         state: Unused
         labels: Unused
         **kwargs:
-            - node: FedEdgeServer instance (required)
-            - split_point: int - Fixed split layer (default: model_len // 2)
+            - node: FedEdgeServer (required)
+            - split_point: Fixed split layer (default: model_len // 2)
 
     Returns:
-        Dict[NodeIdentifier, int]: Same split point for all clients
-
-    Example:
-        >>> uniform_split([], [], node=edge, split_point=4)
-        {
-            NodeIdentifier('client1'): 4,
-            NodeIdentifier('client2'): 4,
-            NodeIdentifier('client3'): 4
-        }
+        Dict[NodeIdentifier, int]: Same split for all clients
     """
     node = kwargs.get('node')
     if node is None:
-        raise ValueError("❌ uniform_split requires 'node' parameter")
+        raise ValueError("uniform_split requires 'node' parameter")
 
     model_len = _get_model_length(node)
     fixed_split = kwargs.get('split_point', model_len // 2)
     fixed_split = _validate_split_point(fixed_split, model_len)
 
-    # Get all clients
     clients = node.get_neighbors([NodeType.CLIENT])
-
-    # Assign same split to all
     split_layers = {client: fixed_split for client in clients}
 
     return split_layers
@@ -354,31 +382,22 @@ def random_split(state, labels, **kwargs) -> Dict[NodeIdentifier, int]:
     """
     Random splitting - each client gets random split point.
 
-    Used for:
-    - Baseline comparisons
-    - Testing system robustness
-    - Exploring split space
+    Use cases:
+        - Baseline comparisons
+        - Robustness testing
+        - Exploration
 
     Args:
         state: Unused
         labels: Unused
-        **kwargs:
-            - node: FedEdgeServer instance (required)
+        **kwargs: Must contain 'node'
 
     Returns:
         Dict[NodeIdentifier, int]: Random split per client
-
-    Example:
-        >>> random_split([], [], node=edge)
-        {
-            NodeIdentifier('client1'): 2,
-            NodeIdentifier('client2'): 5,
-            NodeIdentifier('client3'): 3
-        }
     """
     node = kwargs.get('node')
     if node is None:
-        raise ValueError("❌ random_split requires 'node' parameter")
+        raise ValueError("random_split requires 'node' parameter")
 
     model_len = _get_model_length(node)
     clients = node.get_neighbors([NodeType.CLIENT])
@@ -392,38 +411,15 @@ def random_split(state, labels, **kwargs) -> Dict[NodeIdentifier, int]:
 
 
 # ═══════════════════════════════════════════════════════════════
-# 🔵 Section 2: Legacy/Compatibility Methods
+#  Edge Case Methods
 # ═══════════════════════════════════════════════════════════════
 
 def no_split(state, labels, **kwargs) -> Dict[NodeIdentifier, int]:
     """
-    No splitting - entire model runs on edge server.
+    No splitting - entire model on edge server.
 
-    Client only sends raw data, all computation on edge.
+    Client sends raw data, edge does all computation.
     Equivalent to centralized training.
-
-    Args:
-        state: Unused
-        labels: Unused
-        **kwargs: Must contain 'node' (FedEdgeServer)
-
-    Returns:
-        Dict[NodeIdentifier, int]: Split point = 0 for all clients
-    """
-    node = kwargs.get('node')
-    if node is None:
-        raise ValueError("❌ no_split requires 'node' parameter")
-
-    clients = node.get_neighbors([NodeType.CLIENT])
-    return {client: 0 for client in clients}
-
-
-def full_client_split(state, labels, **kwargs) -> Dict[NodeIdentifier, int]:
-    """
-    Full client-side computation - no offloading to edge.
-
-    Client runs entire model, edge only aggregates.
-    Maximum client computation, minimum communication.
 
     Args:
         state: Unused
@@ -431,11 +427,33 @@ def full_client_split(state, labels, **kwargs) -> Dict[NodeIdentifier, int]:
         **kwargs: Must contain 'node'
 
     Returns:
-        Dict[NodeIdentifier, int]: Split point = model_len - 1 for all
+        Dict[NodeIdentifier, int]: Split = 0 for all clients
     """
     node = kwargs.get('node')
     if node is None:
-        raise ValueError("❌ full_client_split requires 'node' parameter")
+        raise ValueError("no_split requires 'node' parameter")
+
+    clients = node.get_neighbors([NodeType.CLIENT])
+    return {client: 0 for client in clients}
+
+
+def full_client_split(state, labels, **kwargs) -> Dict[NodeIdentifier, int]:
+    """
+    Full client-side computation - no offloading.
+
+    Client runs entire model, edge only aggregates.
+
+    Args:
+        state: Unused
+        labels: Unused
+        **kwargs: Must contain 'node'
+
+    Returns:
+        Dict[NodeIdentifier, int]: Split = model_len - 1 for all
+    """
+    node = kwargs.get('node')
+    if node is None:
+        raise ValueError("full_client_split requires 'node' parameter")
 
     model_len = _get_model_length(node)
     clients = node.get_neighbors([NodeType.CLIENT])
@@ -444,49 +462,38 @@ def full_client_split(state, labels, **kwargs) -> Dict[NodeIdentifier, int]:
 
 
 # ═══════════════════════════════════════════════════════════════
-# 🔧 Section 3: Utility Functions
+#  Utility Functions
 # ═══════════════════════════════════════════════════════════════
 
 def action_to_layer(action: List[float]) -> List[int]:
     """
-    Convert RL action values to layer indices.
+    Convert RL action values [0, 1] to discrete layer indices.
 
-    Maps continuous action space [0, 1] to discrete layer indices
-    based on cumulative FLOPs distribution.
-
-    Used in RL-based splitting strategies.
+    Maps continuous action space to layers based on cumulative FLOPs.
 
     Args:
         action: List of action values in [0, 1]
 
     Returns:
         List[int]: Corresponding layer indices
-
-    Example:
-        >>> action_to_layer([0.3, 0.7, 0.5])
-        [2, 5, 3]  # Mapped to layers based on workload
     """
-    # Compute workload distribution
     model_cfg = model_utils.get_unit_model().cfg
     workload_dist = _compute_workload_distribution(model_cfg)
 
     split_layers = []
     for action_val in action:
-        # Find closest layer to action value
         idx = np.argmin(np.abs(workload_dist - action_val))
-
-        # Clamp to valid range
         split_layers.append(_validate_split_point(idx, len(model_cfg)))
 
     return split_layers
 
 
 # ═══════════════════════════════════════════════════════════════
-# 🔧 Section 4: Method Registry
+#  Method Registry
 # ═══════════════════════════════════════════════════════════════
 
 SPLITTING_METHODS: Dict[str, Callable] = {
-    # Primary methods for semi-decentralized FL
+    # Primary methods
     'optimal_split': optimal_split,
     'bandwidth_aware': bandwidth_aware_split,
     'adaptive': adaptive_split,
@@ -501,26 +508,22 @@ SPLITTING_METHODS: Dict[str, Callable] = {
 
 def get_splitting_method(method_name: str) -> Callable:
     """
-    Retrieve splitting method by name with validation.
+    Retrieve splitting method by name.
 
     Args:
-        method_name: Name of the splitting method
+        method_name: Name of splitting method
 
     Returns:
         Callable: Splitting function
 
     Raises:
-        ValueError: If method name not found
-
-    Example:
-        >>> func = get_splitting_method('optimal_split')
-        >>> splits = func([], [], node=edge_server)
+        ValueError: If method not found
     """
     if method_name not in SPLITTING_METHODS:
         available = ', '.join(SPLITTING_METHODS.keys())
         raise ValueError(
-            f"❌ Splitting method '{method_name}' not found.\n"
-            f"Available methods: {available}"
+            f"Splitting method '{method_name}' not found. "
+            f"Available: {available}"
         )
 
     return SPLITTING_METHODS[method_name]
@@ -528,90 +531,62 @@ def get_splitting_method(method_name: str) -> Callable:
 
 def list_available_methods() -> List[str]:
     """
-    Get list of all available splitting methods.
+    Get list of available splitting methods.
 
     Returns:
         List[str]: Method names
-
-    Example:
-        >>> list_available_methods()
-        ['optimal_split', 'bandwidth_aware', 'adaptive', ...]
     """
     return list(SPLITTING_METHODS.keys())
 
 
 # ═══════════════════════════════════════════════════════════════
-# 🔧 Section 5: Validation and Debugging
+#  Validation and Debugging
 # ═══════════════════════════════════════════════════════════════
 
-def validate_split_layers(
-        split_layers: Dict[NodeIdentifier, int],
-        model_len: int
-) -> bool:
+def validate_split_layers(split_layers: Dict[NodeIdentifier, int], model_len: int) -> bool:
     """
-    Validate split layer dictionary for correctness.
+    Validate split layer dictionary.
 
     Checks:
-        - All split points in valid range [1, model_len-1]
-        - No missing clients
-        - No invalid types
+        - All splits in valid range [1, model_len-1]
+        - Correct data types
 
     Args:
-        split_layers: Dict mapping clients to split points
+        split_layers: Dict mapping clients to splits
         model_len: Total number of layers
 
     Returns:
-        bool: True if valid, raises exception otherwise
+        bool: True if valid
 
     Raises:
         ValueError: If validation fails
-
-    Example:
-        >>> splits = {NodeIdentifier('c1'): 3, NodeIdentifier('c2'): 5}
-        >>> validate_split_layers(splits, model_len=7)
-        True
     """
     if not split_layers:
-        raise ValueError("❌ Split layers dictionary is empty")
+        raise ValueError("Split layers dictionary is empty")
 
     for client, split in split_layers.items():
-        # Check type
         if not isinstance(split, int):
             raise ValueError(
-                f"❌ Invalid split type for {client}: {type(split)} "
-                f"(expected int)"
+                f"Invalid split type for {client}: {type(split)} (expected int)"
             )
 
-        # Check range
         if split < 1 or split >= model_len:
             raise ValueError(
-                f"❌ Invalid split point for {client}: {split} "
+                f"Invalid split point for {client}: {split} "
                 f"(must be in [1, {model_len - 1}])"
             )
 
     return True
 
 
-def print_split_summary(
-        split_layers: Dict[NodeIdentifier, int],
-        bandwidths: Optional[List[float]] = None
-):
+def print_split_summary(split_layers: Dict[NodeIdentifier, int],
+                       bandwidths: Optional[List[float]] = None):
     """
     Print formatted summary of split decisions.
 
-    Useful for debugging and monitoring.
-
     Args:
         split_layers: Split point per client
-        bandwidths: Optional bandwidth values for context
-
-    Example:
-        >>> print_split_summary(splits, [15.0, 8.5])
-        ╔══════════════════════════════════════╗
-        ║   Split Layer Summary (Round 10)    ║
-        ╚══════════════════════════════════════╝
-        client1: Split=6, BW=15.0 Mbps
-        client2: Split=3, BW=8.5 Mbps
+        bandwidths: Optional bandwidth values
     """
     print("\n" + "=" * 50)
     print(f"  Split Layer Summary (Round {config.current_round})")
@@ -621,11 +596,7 @@ def print_split_summary(
 
     for i, client in enumerate(clients):
         split = split_layers[client]
-        bw_info = f", BW={bandwidths[i]:.1f} Mbps" if bandwidths else ""
+        bw_info = f", BW={bandwidths[i]:.1f} Mbps" if bandwidths and i < len(bandwidths) else ""
         print(f"{client}: Split={split}{bw_info}")
 
     print("=" * 50 + "\n")
-
-# ═══════════════════════════════════════════════════════════════
-# End
-# ═══════════════════════════════════════════════════════════════

@@ -1,4 +1,15 @@
+"""
+Edge Server Training Flow - Semi-Decentralized FL
+
+Supports:
+    - Decentralized mode (edge-client direct communication)
+    - Centralized mode (cloud-based coordination)
+    - Hardcoded bandwidth integration
+    - Dynamic splitting and clustering
+"""
+
 import time
+from typing import Dict, List
 
 from app.config import config
 from app.config.logger import fed_logger
@@ -9,17 +20,18 @@ from app.entity.node_type import NodeType
 from app.util import graph_utils, model_utils
 
 
-def run_decentralized(edge_server: FedEdgeServer, learning_rate, options: dict):
+def run_decentralized(edge_server: FedEdgeServer, learning_rate: float, options: dict):
     """
-    Execute decentralized federated learning on edge server.
+    Run decentralized federated learning with edge-client collaboration.
 
     Args:
-        edge_server: Edge server instance
-        learning_rate: Learning rate for training
-        options: Configuration options including splitting and clustering methods
+        edge_server: FedEdgeServer instance
+        learning_rate: Initial learning rate
+        options: Training configuration dict
     """
+    # Initialize model and split configuration
     edge_server.initialize(learning_rate)
-    fed_logger.info(f"Split Config : {edge_server.split_layers}")
+    fed_logger.info(f"Initial Split Config: {edge_server.split_layers}")
     edge_server.scatter_split_layers([NodeType.CLIENT])
 
     # Metrics tracking
@@ -28,155 +40,171 @@ def run_decentralized(edge_server: FedEdgeServer, learning_rate, options: dict):
     rounds = []
     accuracy = []
 
+    # Training loop
     for r in range(config.R):
         config.current_round = r
         rounds.append(r)
         fed_logger.info('====================================>')
-        fed_logger.info('==> Round {:} Start'.format(r + 1))
+        fed_logger.info(f'==> Round {r + 1} Start')
 
-        # Broadcast global model weights to all clients
-        fed_logger.info("sending global weights")
+        # Distribute global model
+        fed_logger.info("Sending global weights to clients")
         edge_server.scatter_global_weights([NodeType.CLIENT])
 
         s_time = time.time()
 
-        # Gather network bandwidth information from neighbors
-        fed_logger.info("gathering neighbors network speed")
-        edge_server.gather_neighbors_network_bandwidth()
+        # Gather bandwidth measurements (unless using hardcoded)
+        if not config.USE_HARDCODED_BW:
+            fed_logger.info("Gathering neighbors network bandwidth")
+            edge_server.gather_neighbors_network_bandwidth()
+        else:
+            fed_logger.info("Using hardcoded bandwidth values")
 
-        # Perform clustering on clients (if enabled in options)
-        fed_logger.info("clustering")
+        # Clustering (if enabled)
+        fed_logger.info("Performing clustering")
         edge_server.clustering(options)
 
-        # Collect and organize bandwidth data by node type
-        fed_logger.info("getting neighbors bandwidth")
-        neighbors_bandwidth = edge_server.get_neighbors_bandwidth()
-        neighbors_bandwidth_by_type: dict[NodeType, list[float]] = {}
-
-        for neighbor, bw in neighbors_bandwidth.items():
-            neighbor_type = HTTPCommunicator.get_node_type(neighbor)
-            if neighbor_type not in neighbors_bandwidth_by_type:
-                neighbors_bandwidth_by_type[neighbor_type] = []
-            neighbors_bandwidth_by_type[neighbor_type].append(bw.bandwidth)
-
-        # Calculate average bandwidth for clients
-        client_bw.append(
-            sum(neighbors_bandwidth_by_type[NodeType.CLIENT]) / len(neighbors_bandwidth_by_type[NodeType.CLIENT]))
-
-        # Calculate average bandwidth for edge servers (if any)
-        if NodeType.EDGE in neighbors_bandwidth_by_type:
-            edge_bw.append(
-                sum(neighbors_bandwidth_by_type[NodeType.EDGE]) / len(neighbors_bandwidth_by_type[NodeType.EDGE]))
+        # Extract bandwidth values for splitting
+        client_bandwidths = []
+        if config.USE_HARDCODED_BW:
+            # Use hardcoded bandwidths
+            clients = edge_server.get_neighbors([NodeType.CLIENT])
+            for client in clients:
+                bw = edge_server._get_hardcoded_bandwidth(client)
+                client_bandwidths.append(bw.to_mbps())
         else:
-            edge_bw.append(0)
+            # Use measured bandwidths
+            neighbors_bandwidth = edge_server.get_neighbors_bandwidth()
+            for neighbor, bw in neighbors_bandwidth.items():
+                neighbor_type = HTTPCommunicator.get_node_type(neighbor)
+                if neighbor_type == NodeType.CLIENT:
+                    client_bandwidths.append(bw.to_mbps())
 
-        # Determine split points based on bandwidth and clustering
-        # Pass client bandwidth list and options to splitting function
-        fed_logger.info("splitting")
-        edge_server.split(neighbors_bandwidth_by_type.get(NodeType.CLIENT, []), options)
-        fed_logger.info(f"Split Config : {edge_server.split_layers}")
+        # Record average bandwidths for metrics
+        if client_bandwidths:
+            avg_client_bw = sum(client_bandwidths) / len(client_bandwidths)
+            client_bw.append(avg_client_bw)
+        else:
+            client_bw.append(0.0)
 
-        # Broadcast updated split configuration to clients
+        # Calculate edge bandwidth (if applicable)
+        if not config.USE_HARDCODED_BW:
+            neighbors_bandwidth = edge_server.get_neighbors_bandwidth()
+            edge_bandwidths = []
+            for neighbor, bw in neighbors_bandwidth.items():
+                neighbor_type = HTTPCommunicator.get_node_type(neighbor)
+                if neighbor_type == NodeType.EDGE:
+                    edge_bandwidths.append(bw.to_mbps())
+
+            if edge_bandwidths:
+                edge_bw.append(sum(edge_bandwidths) / len(edge_bandwidths))
+            else:
+                edge_bw.append(0.0)
+        else:
+            edge_bw.append(0.0)
+
+        # Perform splitting based on bandwidth
+        fed_logger.info("Calculating optimal split points")
+        edge_server.split(client_bandwidths, options)
+        fed_logger.info(f"Updated Split Config: {edge_server.split_layers}")
         edge_server.scatter_split_layers([NodeType.CLIENT])
 
-        # Execute local training on clients with current split configuration
-        fed_logger.info("start training")
+        # Start training round
+        fed_logger.info("Starting decentralized training")
         edge_server.start_decentralized_training()
 
-        # Collect trained local model weights from all clients
-        fed_logger.info("receiving local weights")
+        # Gather local updates
+        fed_logger.info("Receiving local weights from clients")
         local_weights = edge_server.gather_local_weights()
 
-        # Aggregate collected weights using configured aggregation method
-        fed_logger.info("aggregating weights")
+        # Aggregate updates
+        fed_logger.info("Aggregating local weights")
         edge_server.aggregate(local_weights)
 
-        # Exchange aggregated model with neighboring edge servers (if any)
-        fed_logger.info("start gossiping with neighbors")
+        # Gossip with neighbor edges (if any)
+        fed_logger.info("Gossiping with neighbor edges")
         edge_server.gossip_with_neighbors()
 
         e_time = time.time()
-
-        # Calculate and record round metrics
         training_time = e_time - s_time
         training_times.append(training_time)
 
-        # Evaluate global model accuracy on test set
-        fed_logger.info("testing accuracy")
-        test_acc = model_utils.test(edge_server.uninet, edge_server.testloader, edge_server.device,
-                                    edge_server.criterion)
-        fed_logger.info(f"Test Accuracy : {test_acc}")
+        # Evaluate global model
+        fed_logger.info("Testing model accuracy")
+        test_acc = model_utils.test(
+            edge_server.uninet,
+            edge_server.testloader,
+            edge_server.device,
+            edge_server.criterion
+        )
+        fed_logger.info(f"Test Accuracy: {test_acc:.4f}")
         accuracy.append(test_acc)
 
-        fed_logger.info('Round Finish')
-        fed_logger.info('==> Round {:} End'.format(r + 1))
-        fed_logger.info('==> Round Training Time: {:}'.format(training_time))
+        fed_logger.info(f'==> Round {r + 1} End')
+        fed_logger.info(f'==> Round Training Time: {training_time:.2f}s')
 
-    # Generate and save performance reports
+    # Report final results
     graph_utils.report_results(edge_server, training_times, client_bw, accuracy, edge_bw)
 
 
-def run_centralized(edge_server: FedEdgeServer, learning_rate):
+def run_centralized(edge_server: FedEdgeServer, learning_rate: float):
     """
-    Execute centralized federated learning through central server.
+    Run centralized federated learning (legacy mode).
 
     Args:
-        edge_server: Edge server instance acting as intermediary
-        learning_rate: Learning rate for training
+        edge_server: FedEdgeServer instance
+        learning_rate: Initial learning rate
     """
-    # Initial setup: receive split configuration from central server
     edge_server.gather_and_scatter_split_config()
     edge_server.initialize(learning_rate)
 
     for r in range(config.R):
         config.current_round = r
         fed_logger.info('====================================>')
-        fed_logger.info('==> Round {:} Start'.format(r + 1))
+        fed_logger.info(f'==> Round {r + 1} Start')
 
-        # Synchronize split configuration with central server
-        fed_logger.info("receiving and sending splitting info")
+        # Exchange split configuration
+        fed_logger.info("Exchanging split configuration")
         edge_server.gather_and_scatter_split_config()
 
-        # Synchronize global model weights with central server
-        fed_logger.info("receiving and sending global weights")
+        # Exchange global weights
+        fed_logger.info("Exchanging global weights")
         edge_server.gather_and_scatter_global_weight()
 
-        # Monitor client network conditions
-        fed_logger.info("test clients network")
+        # Test network conditions
+        fed_logger.info("Testing client network")
         edge_server.gather_neighbors_network_bandwidth()
 
-        # Execute centralized training (forward/backward through server)
-        fed_logger.info("start training")
+        # Start training
+        fed_logger.info("Starting centralized training")
         edge_server.start_centralized_training()
 
-        fed_logger.info('==> Round {:} End'.format(r + 1))
+        fed_logger.info(f'==> Round {r + 1} End')
 
 
-def run(options_ins):
+def run(options_ins: dict):
     """
-    Main entry point for edge server federated learning.
+    Main entry point for edge server training.
 
     Args:
-        options_ins: Dictionary containing all configuration options:
-            - ip: Edge server IP address
+        options_ins: Configuration dictionary containing:
+            - ip: Edge server IP
             - port: Edge server port
             - model: Model architecture name
             - dataset: Dataset name
-            - offload: Whether to offload computation
-            - decentralized: Training mode (True=decentralized, False=centralized)
-            - aggregation: Aggregation method name
-            - splitting: Splitting strategy name
-            - clustering: Clustering method name (optional)
+            - offload: Enable offloading
+            - decentralized: Use decentralized mode
+            - aggregation: Aggregation method
     """
     LR = config.learning_rate
-    fed_logger.info('Preparing Sever.')
+    fed_logger.info('Preparing Edge Server')
 
-    # Extract configuration options
+    # Extract configuration
     offload = options_ins.get('offload')
     decentralized = options_ins.get('decentralized')
     aggregator = create_aggregator(options_ins.get('aggregation'))
 
-    # Initialize edge server with specified configuration
+    # Initialize edge server
     edge_server = FedEdgeServer(
         options_ins.get('ip'),
         options_ins.get('port'),
@@ -187,15 +215,17 @@ def run(options_ins):
         config.CURRENT_NODE_NEIGHBORS
     )
 
-    fed_logger.info("neighbors: " + str(config.CURRENT_NODE_NEIGHBORS))
-    fed_logger.info("start mode: " + str(options_ins.values()))
+    fed_logger.info(f"Neighbors: {config.CURRENT_NODE_NEIGHBORS}")
+    fed_logger.info(f"Configuration: {list(options_ins.values())}")
+    fed_logger.info(f"Hardcoded BW Mode: {config.USE_HARDCODED_BW}")
 
-    # Execute appropriate training mode
+    # Run appropriate mode
     if decentralized:
         run_decentralized(edge_server, LR, options_ins)
     else:
         run_centralized(edge_server, LR)
 
-    # Graceful shutdown
+    # Cleanup
     time.sleep(10)
     edge_server.stop_server()
+    fed_logger.info("Edge server stopped successfully")
