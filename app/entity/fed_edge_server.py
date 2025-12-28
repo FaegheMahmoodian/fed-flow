@@ -16,8 +16,8 @@ from torch import optim, nn
 
 from app.config import config
 from app.config.logger import fed_logger
-from app.entity.bandwidth import BandWidth
-from app.model.base_model import BaseModel
+from app.dto.bandwidth import BandWidth
+from app.dto.base_model import BaseModel
 from app.dto.message import (
     IterationFlagMessage,
     GlobalWeightMessage,

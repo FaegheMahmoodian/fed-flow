@@ -144,7 +144,7 @@ class FedClient(FedBaseNodeInterface):
 
         # Perform real bandwidth measurement
         fed_logger.info("Sending network test data to edge")
-        msg = NetworkTestMessage([self.net.to(self.device).state_dict()])
+        msg = NetworkTestMessage([])
         self.scatter_msg(msg, [NodeType.EDGE])
 
         # Wait for acknowledgment
