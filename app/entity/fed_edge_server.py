@@ -105,7 +105,21 @@ class FedEdgeServer(FedBaseNodeInterface):
         return self.neighbor_bandwidth
 
     def split(self, state, options: dict):
-        self.split_layers = fl_method_parser.fl_methods.get(options.get('splitting'))(state, self.group_labels, self)
+        result = fl_method_parser.fl_methods.get(options.get('splitting'))(state, self.group_labels, self)
+
+        # --- DEBUG FIX: ensure dict[NodeIdentifier -> cut] for decentralized client-edge ---
+        if isinstance(result, list):
+            clients = list(self.get_neighbors([NodeType.CLIENT]))
+            default_cut = model_utils.get_unit_model_len() - 1
+            mapped = {}
+            for i, c in enumerate(clients):
+                cut = result[i] if i < len(result) else default_cut
+                # clamp to valid range
+                cut = max(1, min(int(cut), default_cut))
+                mapped[c] = cut
+            result = mapped
+
+        self.split_layers = result
         fed_logger.info('Next Round OPs: ' + str(self.split_layers))
 
     def gather_and_scatter_split_config(self):
