@@ -1,0 +1,250 @@
+services:
+  broker:
+    image: rabbitmq:3-management
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    environment:
+      RABBITMQ_DEFAULT_USER: rabbitmq
+      RABBITMQ_DEFAULT_PASS: rabbitmq
+      RABBITMQ_MAX_MESSAGE_SIZE: 536870912
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 30s
+      timeout: 30s
+      retries: 3
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+
+  client1:
+    image: autlpdslab/fedflow:latest
+    working_dir: /fed-flow
+    depends_on:
+      broker:
+        condition: service_healthy
+    environment:
+      AGGREGATION: "fedavg"
+      DECENTRALIZED: "True"
+      D2D: "False"
+      MOBILITY: "False"
+      CLUSTERING: "none_clustering"
+      OFFLOADING: "True"
+      SPLITTING_METHOD: "random_splitting"
+      MODEL: "VGG"
+      DATASET: "cifar10"
+      ROUND_COUNT: "2"
+      DEVICE_COUNT: "3"
+      NODE_INDEX: "0"
+      IP: "client1"
+      PORT: "8080"
+      RABBITMQ_URL: "amqp://rabbitmq:rabbitmq@broker:5672/client1"
+      NEIGHBORS: "edge1,8083"
+      NODE_TYPE: "client"
+      SCENARIO_DESCRIPTION: "Decentralized fully_connected 2 3 Offloading cifar10"
+    entrypoint: >
+      bash -c "python3 /fed-flow/main.py
+      --aggregation $$AGGREGATION
+      --decentralized $$DECENTRALIZED
+      --d2d $$D2D
+      --mobility $$MOBILITY
+      --clustering $$CLUSTERING
+      -o $$OFFLOADING
+      -s $$SPLITTING_METHOD
+      --model $$MODEL
+      --dataset $$DATASET
+      --index $$NODE_INDEX
+      --ip $$IP
+      --port $$PORT
+      --rabbitmq-url $$RABBITMQ_URL
+      --neighbors $$NEIGHBORS
+      --node-type $$NODE_TYPE"
+    volumes:
+      - ./Results:/fed-flow/Results
+      - ./data:/fed-flow/app/dataset/data
+
+  client2:
+    image: autlpdslab/fedflow:latest
+    working_dir: /fed-flow
+    depends_on:
+      broker:
+        condition: service_healthy
+    environment:
+      AGGREGATION: "fedavg"
+      DECENTRALIZED: "True"
+      D2D: "False"
+      MOBILITY: "False"
+      CLUSTERING: "none_clustering"
+      OFFLOADING: "True"
+      SPLITTING_METHOD: "random_splitting"
+      MODEL: "VGG"
+      DATASET: "cifar10"
+      ROUND_COUNT: "2"
+      DEVICE_COUNT: "3"
+      NODE_INDEX: "1"
+      IP: "client2"
+      PORT: "8081"
+      RABBITMQ_URL: "amqp://rabbitmq:rabbitmq@broker:5672/client2"
+      NEIGHBORS: "edge1,8083"
+      NODE_TYPE: "client"
+      SCENARIO_DESCRIPTION: "Decentralized fully_connected 2 3 Offloading cifar10"
+    entrypoint: >
+      bash -c "python3 /fed-flow/main.py
+      --aggregation $$AGGREGATION
+      --decentralized $$DECENTRALIZED
+      --d2d $$D2D
+      --mobility $$MOBILITY
+      --clustering $$CLUSTERING
+      -o $$OFFLOADING
+      -s $$SPLITTING_METHOD
+      --model $$MODEL
+      --dataset $$DATASET
+      --index $$NODE_INDEX
+      --ip $$IP
+      --port $$PORT
+      --rabbitmq-url $$RABBITMQ_URL
+      --neighbors $$NEIGHBORS
+      --node-type $$NODE_TYPE"
+    volumes:
+      - ./Results:/fed-flow/Results
+      - ./data:/fed-flow/app/dataset/data
+
+  client3:
+    image: autlpdslab/fedflow:latest
+    working_dir: /fed-flow
+    depends_on:
+      broker:
+        condition: service_healthy
+    environment:
+      AGGREGATION: "fedavg"
+      DECENTRALIZED: "True"
+      D2D: "False"
+  GNU nano 4.8                                                               docker-compose.yml                                                                               MOBILITY: "False"
+      CLUSTERING: "none_clustering"
+      OFFLOADING: "True"
+      SPLITTING_METHOD: "random_splitting"
+      MODEL: "VGG"
+      DATASET: "cifar10"
+      ROUND_COUNT: "2"
+      DEVICE_COUNT: "3"
+      NODE_INDEX: "2"
+      IP: "client3"
+      PORT: "8082"
+      RABBITMQ_URL: "amqp://rabbitmq:rabbitmq@broker:5672/client3"
+      NEIGHBORS: "edge2,8084"
+      NODE_TYPE: "client"
+      SCENARIO_DESCRIPTION: "Decentralized fully_connected 2 3 Offloading cifar10"
+    entrypoint: >
+      bash -c "python3 /fed-flow/main.py
+      --aggregation $$AGGREGATION
+      --decentralized $$DECENTRALIZED
+      --d2d $$D2D
+      --mobility $$MOBILITY
+      --clustering $$CLUSTERING
+      -o $$OFFLOADING
+      -s $$SPLITTING_METHOD
+      --model $$MODEL
+      --dataset $$DATASET
+      --index $$NODE_INDEX
+      --ip $$IP
+      --port $$PORT
+      --rabbitmq-url $$RABBITMQ_URL
+      --neighbors $$NEIGHBORS
+      --node-type $$NODE_TYPE"
+    volumes:
+      - ./Results:/fed-flow/Results
+      - ./data:/fed-flow/app/dataset/data
+
+  edge1:
+    image: autlpdslab/fedflow:latest
+    working_dir: /fed-flow
+    depends_on:
+      broker:
+        condition: service_healthy
+    environment:
+      AGGREGATION: "fedavg"
+      DECENTRALIZED: "True"
+      D2D: "False"
+      MOBILITY: "False"
+      CLUSTERING: "none_clustering"
+      OFFLOADING: "True"
+      SPLITTING_METHOD: "random_splitting"
+      MODEL: "VGG"
+      DATASET: "cifar10"
+      ROUND_COUNT: "2"
+      DEVICE_COUNT: "3"
+      NODE_INDEX: "0"
+      IP: "edge1"
+      PORT: "8083"
+      RABBITMQ_URL: "amqp://rabbitmq:rabbitmq@broker:5672/edge1"
+      NEIGHBORS: "edge2,8084 client1,8080 client2,8081"
+      NODE_TYPE: "edge"
+      SCENARIO_DESCRIPTION: "Decentralized fully_connected 2 3 Offloading cifar10"
+    entrypoint: >
+      bash -c "python3 /fed-flow/main.py
+      --aggregation $$AGGREGATION
+      --decentralized $$DECENTRALIZED
+      --d2d $$D2D
+      --mobility $$MOBILITY
+      --clustering $$CLUSTERING
+      -o $$OFFLOADING
+      -s $$SPLITTING_METHOD
+      --model $$MODEL
+      --dataset $$DATASET
+      --index $$NODE_INDEX
+      --ip $$IP
+      --port $$PORT
+      --rabbitmq-url $$RABBITMQ_URL
+      --neighbors $$NEIGHBORS
+      --node-type $$NODE_TYPE"
+    volumes:
+      - ./Results:/fed-flow/Results
+      - ./data:/fed-flow/app/dataset/data
+
+  edge2:
+    image: autlpdslab/fedflow:latest
+    working_dir: /fed-flow
+    depends_on:
+      broker:
+        condition: service_healthy
+    environment:
+      AGGREGATION: "fedavg"
+      DECENTRALIZED: "True"
+      D2D: "False"
+      MOBILITY: "False"
+      CLUSTERING: "none_clustering"
+      OFFLOADING: "True"
+      SPLITTING_METHOD: "random_splitting"
+      MODEL: "VGG"
+      DATASET: "cifar10"
+      ROUND_COUNT: "2"
+      DEVICE_COUNT: "3"
+      NODE_INDEX: "1"
+      IP: "edge2"
+      PORT: "8084"
+      RABBITMQ_URL: "amqp://rabbitmq:rabbitmq@broker:5672/edge2"
+      NEIGHBORS: "edge1,8083 client3,8082"
+      NODE_TYPE: "edge"
+      SCENARIO_DESCRIPTION: "Decentralized fully_connected 2 3 Offloading cifar10"
+    entrypoint: >
+      bash -c "python3 /fed-flow/main.py
+      --aggregation $$AGGREGATION
+      --decentralized $$DECENTRALIZED
+      --d2d $$D2D
+      --mobility $$MOBILITY
+      --clustering $$CLUSTERING
+      -o $$OFFLOADING
+      -s $$SPLITTING_METHOD
+      --model $$MODEL
+      --dataset $$DATASET
+      --index $$NODE_INDEX
+      --ip $$IP
+      --port $$PORT
+      --rabbitmq-url $$RABBITMQ_URL
+      --neighbors $$NEIGHBORS
+      --node-type $$NODE_TYPE"
+    volumes:
+      - ./Results:/fed-flow/Results
+      - ./data:/fed-flow/app/dataset/data
+
+volumes:
+  rabbitmq_data:
